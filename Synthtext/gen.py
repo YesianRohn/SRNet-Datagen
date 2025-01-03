@@ -13,38 +13,77 @@ import numpy as np
 import pygame
 from pygame import freetype
 import random
-import multiprocessing
 import queue
 import Augmentor
 
 from . import render_text_mask
 from . import colorize
-from . import skeletonization
-from . import render_standard_text
 from . import data_cfg
+import matplotlib.pyplot as plt 
+
+from scipy.ndimage import map_coordinates, gaussian_filter
+
+def assign_ids_to_masks(text_arr, coords):
+    """
+    Assign unique IDs to each character mask within the bounding boxes.
+
+    Args:
+        text_arr: The input mask image (2D array).
+        coords: A 2x4xn matrix, where each bounding box is represented by 4 vertices.
+
+    Returns:
+        A mask image where each character's mask has a unique ID.
+    """
+    # Step 1: Threshold the text_arr to create a binary image
+    binary_mask = np.where(text_arr > 0, 255, 0).astype(np.uint8)
+
+    # Create an output mask with the same shape as text_arr
+    output_mask = np.zeros_like(binary_mask, dtype=np.int32)
+
+    n = coords.shape[2]  # Number of bounding boxes
+
+    for i in range(n):
+        # Get the 4 vertices of the bounding box
+        box = coords[:, :, i]
+        pts = box.T.astype(int)  # Convert to integer type
+        
+        # Create a mask for the current bounding box
+        bbox_mask = np.zeros_like(binary_mask, dtype=np.uint8)
+        cv2.fillPoly(bbox_mask, [pts], 255)  # Fill the bounding box area with 255
+
+        # Extract the intersection of the bounding box mask and the binary mask
+        char_mask = cv2.bitwise_and(binary_mask, bbox_mask)
+
+        # Assign the ID to the character mask (i+1)
+        output_mask[char_mask == 255] = i + 1
+
+    return output_mask
 
 class datagen():
 
     def __init__(self):
         
         freetype.init()
-        cur_file_path = os.path.dirname(__file__)
         
-        font_dir = os.path.join(cur_file_path, data_cfg.font_dir)
-        self.font_list = os.listdir(font_dir)
-        self.font_list = [os.path.join(font_dir, font_name) for font_name in self.font_list]
-        self.standard_font_path = os.path.join(cur_file_path, data_cfg.standard_font_path)
+        self.hard_font_list = [os.path.join(data_cfg.hard_font, font_name) for font_name in os.listdir(data_cfg.hard_font)]
+        self.normal_font_list = [os.path.join(data_cfg.normal_font, font_name) for font_name in os.listdir(data_cfg.normal_font)]
+        self.font_cache = {}
         
-        color_filepath = os.path.join(cur_file_path, data_cfg.color_filepath)
+        color_filepath = data_cfg.color_filepath
         self.colorsRGB, self.colorsLAB = colorize.get_color_matrix(color_filepath)
         
-        text_filepath = os.path.join(cur_file_path, data_cfg.text_filepath)
+        text_filepath = data_cfg.text_filepath
         self.text_list = open(text_filepath, 'r').readlines()
         self.text_list = [text.strip() for text in self.text_list]
+
+        self.chars = list("0123456789:;<=>?@ABCDEFGHIJKLMNOPQRSTUVWXYZ[\\]^_`abcdefghijklmnopqrstuvwxyz{|}~!\"#$%&'()*+,-./")
         
-        bg_filepath = os.path.join(cur_file_path, data_cfg.bg_filepath)
-        self.bg_list = open(bg_filepath, 'r').readlines()
-        self.bg_list = [img_path.strip() for img_path in self.bg_list]
+        bg_filepath = data_cfg.bg_filepath
+        self.bg_list = []
+        for img_file in os.listdir(bg_filepath):
+            full_path = os.path.join(bg_filepath, img_file)
+            if os.path.isfile(full_path) and img_file.lower().endswith(('.png', '.jpg', '.jpeg')):
+                self.bg_list.append(full_path)
         
         self.surf_augmentor = Augmentor.DataPipeline(None)
         self.surf_augmentor.random_distortion(probability = data_cfg.elastic_rate,
@@ -59,12 +98,32 @@ class datagen():
         self.bg_augmentor.random_contrast(probability = data_cfg.contrast_rate, 
             min_factor = data_cfg.contrast_min, max_factor = data_cfg.contrast_max)
 
+    def get_cached_font(self, font_path):
+        if font_path not in self.font_cache:
+            self.font_cache[font_path] = freetype.Font(font_path)
+        return self.font_cache[font_path]
+
+
     def gen_srnet_data_with_background(self):
         
         while True:
             # choose font, text and bg
-            font = np.random.choice(self.font_list)
-            text1, text2 = np.random.choice(self.text_list), np.random.choice(self.text_list)
+            if np.random.rand() < data_cfg.hard_rate:
+                font = np.random.choice(self.hard_font_list)
+            else:
+                font = np.random.choice(self.normal_font_list)
+
+            ### Edit
+            # text1, text2 = np.random.choice(self.text_list), np.random.choice(self.text_list)
+
+            ### Synthesis
+            text1 = np.random.choice(self.text_list)
+            text2 = list(text1)
+            num_to_replace = max(1, len(text1) // 2)
+            replace_indices = np.random.choice(len(text1), num_to_replace, replace=False)
+            for idx in replace_indices:
+                text2[idx] = np.random.choice(self.chars)
+            text2 = ''.join(text2)
             
             upper_rand = np.random.rand()
             if upper_rand < data_cfg.capitalize_rate + data_cfg.uppercase_rate:
@@ -74,7 +133,8 @@ class datagen():
             bg = cv2.imread(random.choice(self.bg_list))
 
             # init font
-            font = freetype.Font(font)
+            font = self.get_cached_font(font)
+            # font = freetype.Font(font)
             font.antialiased = True
             font.origin = True
 
@@ -95,6 +155,8 @@ class datagen():
             param['curve_center'] = int(param['curve_center'] / len(text1) * len(text2))
             surf2, bbs2 = render_text_mask.render_text(font, text2, param)
 
+            del font
+
             # get padding
             padding_ud = np.random.randint(data_cfg.padding_ud[0], data_cfg.padding_ud[1] + 1, 2)
             padding_lr = np.random.randint(data_cfg.padding_lr[0], data_cfg.padding_lr[1] + 1, 2)
@@ -105,16 +167,16 @@ class datagen():
             zoom = data_cfg.zoom_param[0] * np.random.randn(2) + data_cfg.zoom_param[1]
             shear = data_cfg.shear_param[0] * np.random.randn(2) + data_cfg.shear_param[1]
             perspect = data_cfg.perspect_param[0] * np.random.randn(2) +data_cfg.perspect_param[1]
-            surf1 = render_text_mask.perspective(surf1, rotate, zoom, shear, perspect, padding) # w first
-            surf2 = render_text_mask.perspective(surf2, rotate, zoom, shear, perspect, padding) # w first
+            surf1, bbs1 = render_text_mask.perspective(surf1, bbs1, rotate, zoom, shear, perspect, padding) # w first
+            surf2, bbs2 = render_text_mask.perspective(surf2, bbs2, rotate, zoom, shear, perspect, padding) # w first
 
             # choose a background
             surf1_h, surf1_w = surf1.shape[:2]
             surf2_h, surf2_w = surf2.shape[:2]
             surf_h = max(surf1_h, surf2_h)
             surf_w = max(surf1_w, surf2_w)
-            surf1 = render_text_mask.center2size(surf1, (surf_h, surf_w))
-            surf2 = render_text_mask.center2size(surf2, (surf_h, surf_w))
+            surf1, bbs1 = render_text_mask.center2size(surf1, (surf_h, surf_w), bbs1)
+            surf2, bbs2 = render_text_mask.center2size(surf2, (surf_h, surf_w), bbs2)
 
             bg_h, bg_w = bg.shape[:2]
             if bg_w < surf_w or bg_h < surf_h:
@@ -132,9 +194,6 @@ class datagen():
             bgs = [[t_b]]
             self.bg_augmentor.augmentor_images = bgs
             t_b = self.bg_augmentor.sample(1)[0][0]
-
-            # render standard text
-            i_t = render_standard_text.make_standard_text(self.standard_font_path, text2, (surf_h, surf_w))
 
             # get min h of bbs
             min_h1 = np.min(bbs1[:, 3])
@@ -160,119 +219,11 @@ class datagen():
                                           + data_cfg.shadow_opacity_param[1]
                     }
             _, i_s = colorize.colorize(surf1, t_b, fg_col, bg_col, self.colorsRGB, self.colorsLAB, min_h, param)
-            t_t, t_f = colorize.colorize(surf2, t_b, fg_col, bg_col, self.colorsRGB, self.colorsLAB, min_h, param)
-            
+            _, i_t = colorize.colorize(surf2, t_b, fg_col, bg_col, self.colorsRGB, self.colorsLAB, min_h, param)
             # skeletonization
-            t_sk = skeletonization.skeletonization(surf2, 127)
+            surf1 = assign_ids_to_masks(surf1, bbs1)
+            surf2 = assign_ids_to_masks(surf2, bbs2)
             break
    
-        return [i_t, i_s, t_sk, t_t, t_b, t_f, surf2]
+        return [i_s, surf1, i_t, surf2, t_b, text1, text2]
 
-def enqueue_data(queue, capacity):  
-    
-    np.random.seed()
-    gen = datagen()
-    while True:
-        try:
-            data = gen.gen_srnet_data_with_background()
-        except Exception as e:
-            pass
-        if queue.qsize() < capacity:
-            queue.put(data)
-
-class multiprocess_datagen():
-    
-    def __init__(self, process_num, data_capacity):
-        
-        self.process_num = process_num
-        self.data_capacity = data_capacity
-            
-    def multiprocess_runningqueue(self):
-        
-        manager = multiprocessing.Manager()
-        self.queue = manager.Queue()
-        self.pool = multiprocessing.Pool(processes = self.process_num)
-        self.processes = []
-        for _ in range(self.process_num):
-            p = self.pool.apply_async(enqueue_data, args = (self.queue, self.data_capacity))
-            self.processes.append(p)
-        self.pool.close()
-        
-    def dequeue_data(self):
-        
-        while self.queue.empty():
-            pass
-        data = self.queue.get()
-        return data
-        '''
-        data = None
-        if not self.queue.empty():
-            data = self.queue.get()
-        return data
-        '''
-
-    def dequeue_batch(self, batch_size, data_shape):
-        
-        while self.queue.qsize() < batch_size:
-            pass
-
-        i_t_batch, i_s_batch = [], []
-        t_sk_batch, t_t_batch, t_b_batch, t_f_batch = [], [], [], []
-        mask_t_batch = []
-        
-        for i in range(batch_size):
-            i_t, i_s, t_sk, t_t, t_b, t_f, mask_t = self.dequeue_data()
-            i_t_batch.append(i_t)
-            i_s_batch.append(i_s)
-            t_sk_batch.append(t_sk)
-            t_t_batch.append(t_t)
-            t_b_batch.append(t_b)
-            t_f_batch.append(t_f)
-            mask_t_batch.append(mask_t)
-        
-        w_sum = 0
-        for t_b in t_b_batch:
-            h, w = t_b.shape[:2]
-            scale_ratio = data_shape[0] / h
-            w_sum += int(w * scale_ratio)
-        
-        to_h = data_shape[0]
-        to_w = w_sum // batch_size
-        to_w = int(round(to_w / 8)) * 8
-        to_size = (to_w, to_h) # w first for cv2
-        for i in range(batch_size): 
-            i_t_batch[i] = cv2.resize(i_t_batch[i], to_size)
-            i_s_batch[i] = cv2.resize(i_s_batch[i], to_size)
-            t_sk_batch[i] = cv2.resize(t_sk_batch[i], to_size, interpolation=cv2.INTER_NEAREST)
-            t_t_batch[i] = cv2.resize(t_t_batch[i], to_size)
-            t_b_batch[i] = cv2.resize(t_b_batch[i], to_size)
-            t_f_batch[i] = cv2.resize(t_f_batch[i], to_size)
-            mask_t_batch[i] = cv2.resize(mask_t_batch[i], to_size, interpolation=cv2.INTER_NEAREST)
-            # eliminate the effect of resize on t_sk
-            t_sk_batch[i] = skeletonization.skeletonization(mask_t_batch[i], 127)
-
-        i_t_batch = np.stack(i_t_batch)
-        i_s_batch = np.stack(i_s_batch)
-        t_sk_batch = np.expand_dims(np.stack(t_sk_batch), axis = -1)
-        t_t_batch = np.stack(t_t_batch)
-        t_b_batch = np.stack(t_b_batch)
-        t_f_batch = np.stack(t_f_batch)
-        mask_t_batch = np.expand_dims(np.stack(mask_t_batch), axis = -1)
-        
-        i_t_batch = i_t_batch.astype(np.float32) / 127.5 - 1. 
-        i_s_batch = i_s_batch.astype(np.float32) / 127.5 - 1. 
-        t_sk_batch = t_sk_batch.astype(np.float32) / 255. 
-        t_t_batch = t_t_batch.astype(np.float32) / 127.5 - 1. 
-        t_b_batch = t_b_batch.astype(np.float32) / 127.5 - 1. 
-        t_f_batch = t_f_batch.astype(np.float32) / 127.5 - 1.
-        mask_t_batch = mask_t_batch.astype(np.float32) / 255.
-        
-        return [i_t_batch, i_s_batch, t_sk_batch, t_t_batch, t_b_batch, t_f_batch, mask_t_batch]
-    
-    def get_queue_size(self):
-        
-        return self.queue.qsize()
-    
-    def terminate_pool(self):
-        
-        self.pool.terminate()

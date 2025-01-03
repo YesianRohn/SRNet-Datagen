@@ -14,15 +14,37 @@ import math
 import numpy as np
 import pygame, pygame.locals
 from pygame import freetype
+import matplotlib.pyplot as plt 
 
-def center2size(surf, size):
 
+def center2size(surf, size, bbs):
+    """
+    Center the surface in a new canvas of given size and adjust bounding boxes accordingly
+    Args:
+        surf: input surface/image
+        size: target size (height, width)
+        bbs: 2 x 4 x n array of bounding boxes
+    Returns:
+        canvas: centered image
+        transformed_bbs: transformed bounding boxes
+    """
     canvas = np.zeros(size).astype(np.uint8)
     size_h, size_w = size
     surf_h, surf_w = surf.shape[:2]
-    canvas[(size_h-surf_h)//2:(size_h-surf_h)//2+surf_h, (size_w-surf_w)//2:(size_w-surf_w)//2+surf_w] = surf
-    return canvas
-
+    
+    # Calculate offsets
+    offset_y = (size_h - surf_h) // 2
+    offset_x = (size_w - surf_w) // 2
+    
+    # Place the surface in the center of canvas
+    canvas[offset_y:offset_y+surf_h, offset_x:offset_x+surf_w] = surf
+    
+    # Transform bounding boxes if provided
+    transformed_bbs = bbs.copy()
+    # Add offsets to all x and y coordinates
+    transformed_bbs[0, :, :] += offset_x  # x coordinates
+    transformed_bbs[1, :, :] += offset_y  # y coordinates
+    return canvas, transformed_bbs
 
 def crop_safe(arr, rect, bbs=[], pad=0):
     rect = np.array(rect)
@@ -38,6 +60,27 @@ def crop_safe(arr, rect, bbs=[], pad=0):
         return arr, bbs
     else:
         return arr
+
+def visualize_bb(text_arr, bbs):
+    ta = text_arr.copy()
+    for r in bbs:
+        cv2.rectangle(ta, (r[0],r[1]), (r[0]+r[2],r[1]+r[3]), color=128, thickness=1)
+    plt.imshow(ta,cmap='gray')
+    plt.show()
+
+def bb_xywh2coords(bbs):
+    """
+    Takes an nx4 bounding-box matrix specified in x,y,w,h
+    format and outputs a 2x4xn bb-matrix, (4 vertices per bb).
+    """
+    n,_ = bbs.shape
+    coords = np.zeros((2,4,n))
+    for i in range(n):
+        coords[:,:,i] = bbs[i,:2][:,None]
+        coords[0,1,i] += bbs[i,2]
+        coords[:,2,i] += bbs[i,2:4]
+        coords[1,3,i] += bbs[i,3]
+    return coords
 
 def render_normal(font, text):
         
@@ -82,9 +125,8 @@ def render_normal(font, text):
     bbs = np.array(bbs)
     surf_arr, bbs = crop_safe(pygame.surfarray.pixels_alpha(surf), rect_union, bbs, pad=5)
     surf_arr = surf_arr.swapaxes(0,1)
-    
-    #self.visualize_bb(surf_arr,bbs)
-    return surf_arr, bbs
+    # visualize_bb(surf_arr,bbs)
+    return surf_arr, bb_xywh2coords(bbs)
 
 def render_curved(font, text, curve_rate, curve_center = None):
 
@@ -167,81 +209,145 @@ def render_curved(font, text, curve_rate, curve_center = None):
     bbs = np.array(bbs)
     surf_arr, bbs = crop_safe(pygame.surfarray.pixels_alpha(surf), rect_union, bbs, pad = 5)
     surf_arr = surf_arr.swapaxes(0,1)
-    return surf_arr, bbs
+    # visualize_bb(surf_arr,bbs)
+    return surf_arr, bb_xywh2coords(bbs)
 
 def center_warpPerspective(img, H, center, size):
 
     P = np.array([[1, 0, center[0]],
                   [0, 1, center[1]],
-                  [0, 0, 1]], dtype = np.float32)
+                  [0, 0, 1]], dtype=np.float32)
     M = P.dot(H).dot(np.linalg.inv(P))
 
     img = cv2.warpPerspective(img, M, size,
-                    cv2.INTER_LINEAR|cv2.WARP_INVERSE_MAP)
-    return img
+                    cv2.INTER_LINEAR | cv2.WARP_INVERSE_MAP)
+    return img, M
 
 def center_pointsPerspective(points, H, center):
 
     P = np.array([[1, 0, center[0]],
                   [0, 1, center[1]],
-                  [0, 0, 1]], dtype = np.float32)
+                  [0, 0, 1]], dtype=np.float32)
     M = P.dot(H).dot(np.linalg.inv(P))
 
     return M.dot(points)
 
-def perspective(img, rotate_angle, zoom, shear_angle, perspect, pad): # w first
+def transform_bbs(bbs, M, offset_x, offset_y):
+    """
+    Transform bounding boxes using perspective matrix M and apply offset
+    Args:
+        bbs: 2 x 4 x n array of bounding boxes
+        M: 3x3 perspective transform matrix
+        offset_x: x-axis offset to apply after transform
+        offset_y: y-axis offset to apply after transform
+    Returns:
+        transformed_bbs: 2 x 4 x n array of transformed bounding boxes
+    """
+    n = bbs.shape[2]
+    # Convert to homogeneous coordinates
+    homo_bbs = np.ones((3, 4, n), dtype=np.float32)
+    homo_bbs[:2, :, :] = bbs
+    
+    # Apply perspective transform
+    transformed_bbs = np.zeros_like(homo_bbs)
+    for i in range(n):
+        transformed_points = M.dot(homo_bbs[:, :, i])
+        # Normalize by homogeneous coordinate
+        transformed_points = transformed_points / transformed_points[2, :]
+        transformed_bbs[:, :, i] = transformed_points
+    
+    # Apply offset and remove homogeneous coordinate
+    result_bbs = transformed_bbs[:2, :, :]
+    result_bbs[0, :, :] -= offset_x
+    result_bbs[1, :, :] -= offset_y
+    
+    return result_bbs
 
+def perspective(img, bbs, rotate_angle, zoom, shear_angle, perspect, pad): # w first
+    """
+    Apply perspective transform to image and bounding boxes
+    Args:
+        img: input image
+        rotate_angle: rotation angle in degrees
+        zoom: (scale_w, scale_h) tuple for scaling
+        shear_angle: (shear_x, shear_y) tuple for shearing in degrees
+        perspect: (perspect_x, perspect_y) tuple for perspective transform
+        pad: (left, right, top, bottom) padding
+        bbs: 2 x 4 x n array of bounding boxes (optional)
+    Returns:
+        resimg: transformed image
+        transformed_bbs: transformed bounding boxes (if input bbs provided)
+    """
+    # Convert angles to radians
     rotate_angle = rotate_angle * math.pi / 180.
     shear_x_angle = shear_angle[0] * math.pi / 180.
     shear_y_angle = shear_angle[1] * math.pi / 180.
     scale_w, scale_h = zoom
     perspect_x, perspect_y = perspect
-    
-    H_scale = np.array([[scale_w, 0, 0],
-                        [0, scale_h, 0],
-                        [0, 0, 1]], dtype = np.float32)
-    H_rotate = np.array([[math.cos(rotate_angle), math.sin(rotate_angle), 0],
-                         [-math.sin(rotate_angle), math.cos(rotate_angle), 0],
-                         [0, 0, 1]], dtype = np.float32)
-    H_shear = np.array([[1, math.tan(shear_x_angle), 0],
-                        [math.tan(shear_y_angle), 1, 0], 
-                        [0, 0, 1]], dtype = np.float32)
-    H_perspect = np.array([[1, 0, 0],
-                           [0, 1, 0],
-                           [perspect_x, perspect_y, 1]], dtype = np.float32)
 
+    # Create transformation matrices
+    H_scale = np.array([[scale_w, 0, 0], [0, scale_h, 0], [0, 0, 1]], dtype=np.float32)
+    H_rotate = np.array([[math.cos(rotate_angle), math.sin(rotate_angle), 0],
+                        [-math.sin(rotate_angle), math.cos(rotate_angle), 0],
+                        [0, 0, 1]], dtype=np.float32)
+    H_shear = np.array([[1, math.tan(shear_x_angle), 0],
+                       [math.tan(shear_y_angle), 1, 0],
+                       [0, 0, 1]], dtype=np.float32)
+    H_perspect = np.array([[1, 0, 0], [0, 1, 0],
+                          [perspect_x, perspect_y, 1]], dtype=np.float32)
     H = H_rotate.dot(H_shear).dot(H_scale).dot(H_perspect)
 
     img_h, img_w = img.shape[:2]
     img_center = (img_w / 2, img_h / 2)
-    points = np.ones((3, 4), dtype = np.float32)
-    points[:2, 0] = np.array([0, 0], dtype = np.float32).T
-    points[:2, 1] = np.array([img_w, 0], dtype = np.float32).T
-    points[:2, 2] = np.array([img_w, img_h], dtype = np.float32).T
-    points[:2, 3] = np.array([0, img_h], dtype = np.float32).T
+
+    # Calculate canvas size using corner points
+    points = np.ones((3, 4), dtype=np.float32)
+    points[:2, 0] = np.array([0, 0], dtype=np.float32).T
+    points[:2, 1] = np.array([img_w, 0], dtype=np.float32).T
+    points[:2, 2] = np.array([img_w, img_h], dtype=np.float32).T
+    points[:2, 3] = np.array([0, img_h], dtype=np.float32).T
+
     perspected_points = center_pointsPerspective(points, H, img_center)
     perspected_points[0, :] /= perspected_points[2, :]
     perspected_points[1, :] /= perspected_points[2, :]
-    canvas_w = int(2 * max(img_center[0], img_center[0] - np.min(perspected_points[0, :]), 
-                      np.max(perspected_points[0, :]) - img_center[0])) + 10
-    canvas_h = int(2 * max(img_center[1], img_center[1] - np.min(perspected_points[1, :]), 
-                      np.max(perspected_points[1, :]) - img_center[1])) + 10
-    
-    canvas = np.zeros((canvas_h, canvas_w), dtype = np.uint8)
+
+    canvas_w = int(2 * max(img_center[0],
+                          img_center[0] - np.min(perspected_points[0, :]),
+                          np.max(perspected_points[0, :]) - img_center[0])) + 10
+    canvas_h = int(2 * max(img_center[1],
+                          img_center[1] - np.min(perspected_points[1, :]),
+                          np.max(perspected_points[1, :]) - img_center[1])) + 10
+
+    # Create canvas and place image
+    canvas = np.zeros((canvas_h, canvas_w), dtype=np.uint8)
     tly = (canvas_h - img_h) // 2
     tlx = (canvas_w - img_w) // 2
     canvas[tly:tly+img_h, tlx:tlx+img_w] = img
     canvas_center = (canvas_w // 2, canvas_h // 2)
     canvas_size = (canvas_w, canvas_h)
-    canvas = center_warpPerspective(canvas, H, canvas_center, canvas_size)
+
+    # Apply perspective transform
+    canvas, transform_matrix = center_warpPerspective(canvas, H, canvas_center, canvas_size)
+
+    # Find bounds of non-zero pixels
     loc = np.where(canvas > 127)
     miny, minx = np.min(loc[0]), np.min(loc[1])
     maxy, maxx = np.max(loc[0]), np.max(loc[1])
     text_w = maxx - minx + 1
     text_h = maxy - miny + 1
+
+    # Create final image with padding
     resimg = np.zeros((text_h + pad[2] + pad[3], text_w + pad[0] + pad[1])).astype(np.uint8)
     resimg[pad[2]:pad[2]+text_h, pad[0]:pad[0]+text_w] = canvas[miny:maxy+1, minx:maxx+1]
-    return resimg
+
+    # Adjust bounding boxes for initial canvas placement
+    bbs_canvas = bbs.copy()
+    bbs_canvas[0, :, :] += tlx
+    bbs_canvas[1, :, :] += tly
+
+    # Transform bounding boxes and adjust for cropping and padding
+    transformed_bbs = transform_bbs(bbs_canvas, transform_matrix, minx - pad[0], miny - pad[2])
+    return resimg, transformed_bbs
 
 def render_text(font, text, param):
     

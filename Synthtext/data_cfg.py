@@ -5,22 +5,27 @@ Licensed under the GPL License (see LICENSE for details)
 Written by Yu Qian
 """
 import numpy as np
+import os
+
+data_dir = '../SRNet-Datagen/Synthtext/data'
 
 # font
 font_size = [25, 60]
 underline_rate = 0.01
 strong_rate = 0.05
 oblique_rate = 0.02
-font_dir = '/reserve/qianyu/datasets/fonts/english_ttf'
-standard_font_path = '/reserve/qianyu/datasets/fonts/english_ttf/arial.ttf'
+
+hard_rate = 0.5
+hard_font = os.path.join(data_dir, 'fonts/hard')
+normal_font = os.path.join(data_dir, 'fonts/normal')
 
 # text
-text_filepath = 'data/texts.txt'
+text_filepath = os.path.join(data_dir, 'texts.txt')
 capitalize_rate = 0.1
 uppercase_rate = 0.04
 
 # background
-bg_filepath = '/reserve/qianyu/datasets/srnet_bg/labels.txt'
+bg_filepath = os.path.join(data_dir, 'bgf_img')
 
 ## background augment
 brightness_rate = 0.8
@@ -59,5 +64,6 @@ shadow_angle_degree = [1, 3, 5, 7] # shift for shadow_angle_param
 shadow_angle_param = [0.5, None] # scale, shift for np.random.randn()
 shadow_shift_param = np.array([[0, 1, 3], [2, 7, 15]], dtype = np.float32) # scale, shift for np.random.randn()
 shadow_opacity_param = [0.1, 0.5] # shift for shadow_angle_param
-color_filepath = 'data/colors_new.cp'
+shadow_opacity_param = [0.1, 0.5] # shift for shadow_angle_param
+color_filepath = os.path.join(data_dir, 'colors_new.cp')
 use_random_color_rate = 0.5

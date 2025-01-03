@@ -1,0 +1,8 @@
+augmentor==0.2.12
+matplotlib==2.1.1
+tqdm==4.64.1
+scipy==1.0.0 
+pillow==8.4.0 
+numpy==1.19.5
+opencv-python==3.4.9.33 
+pygame==1.9.3

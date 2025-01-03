@@ -7,7 +7,7 @@ Written by Yu Qian
 import numpy as np
 import os
 
-data_dir = '../SRNet-Datagen/Synthtext/data'
+data_dir = './data'
 
 # font
 font_size = [25, 60]

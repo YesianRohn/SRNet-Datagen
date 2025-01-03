@@ -6,19 +6,17 @@ Written by Yu Qian
 """
 
 # dir
-data_dir = '/reserve/qianyu/datasets/srnet_data'
+data_dir = './srnet_data'
 i_t_dir = 'i_t'
 i_s_dir = 'i_s'
+s_sk_dir = 's_sk'
 t_sk_dir = 't_sk'
-t_t_dir = 't_t'
 t_b_dir = 't_b'
-t_f_dir = 't_f'
-mask_t_dir = 'mask_t'
 
 # sample
-sample_num = 100000
+sample_num = 50000
 
 # multiprocess
-process_num = 16
-data_capacity = 256
+# process_num = 16
+# data_capacity = 256
 

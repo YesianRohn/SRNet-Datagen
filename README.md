@@ -1,6 +1,19 @@
 # SRNet-Datagen - A data generator of SRNet
 
-&nbsp;
+```
+conda create -n datagen python=3.6
+conda activate datagen
+pip install -r requirement.txt
+```
+
+```
+vi ./Synthtext/data_cfg.py
+```
+
+```
+python datagen.py
+```
+
 ## Introduction
 This is a data generator of SRNet which is the model described in the paper *Editing Text in the wild*.
 
